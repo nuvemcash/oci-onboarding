@@ -24,3 +24,23 @@ sensível fica neste repositório — ele é totalmente auditável.
 
 Rodar `destroy` na stack do Resource Manager remove o usuário, grupo, API key e
 policy criados.
+
+## Tenants já conectados (reparo de permissões)
+
+Versões antigas deste template não concediam `read usage-report in tenancy`
+(Usage API) — sem ela o nuvem.cash lê o FOCUS mas não ancora o extrato na
+fatura real, e o custo aparece subcontado. Duas rotas de reparo, ambas
+aditivas (nada é removido):
+
+**Console:** Identity & Security › Policies › `nuvemcash-cost-readers`
+(compartimento raiz) → Edit → acrescente o statement:
+
+    allow group nuvemcash-cost-readers to read usage-report in tenancy
+
+**Script idempotente** (requer OCI CLI autenticada como admin do tenancy e jq):
+
+    ./scripts/repair-policy.sh <tenancy_ocid> [profile]
+
+O script só ADICIONA statements ausentes; nunca remove nem substitui os
+existentes. Alternativa equivalente: reaplicar o stack no Resource Manager
+com a versão atual deste template.

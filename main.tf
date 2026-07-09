@@ -112,14 +112,18 @@ resource "oci_identity_domains_api_key" "svc" {
   }
 }
 
-# --- Permissao: policy LEGADA (não há versão domains); endorse cross-tenancy --
+# --- Permissao: policy LEGADA (não há versão domains) -------------------------
+# Cobre as DUAS leituras que o nuvem.cash exercita: os relatórios FOCUS (endorse
+# cross-tenancy no object storage de reporting) e a Usage API (usage-report do
+# próprio tenancy, que ancora o extrato na fatura real — sem ela o extrato subconta).
 resource "oci_identity_policy" "cost_readers" {
   compartment_id = var.tenancy_ocid
   name           = "nuvemcash-cost-readers"
-  description    = "Permite ao grupo nuvemcash-cost-readers ler os relatorios FOCUS"
+  description    = "Permite ao grupo nuvemcash-cost-readers ler os relatorios FOCUS e a Usage API"
   statements = [
     "define tenancy reporting as ${local.reporting_tenancy}",
     "endorse group ${oci_identity_domains_group.readers.display_name} to read objects in tenancy reporting",
+    "allow group ${oci_identity_domains_group.readers.display_name} to read usage-report in tenancy",
   ]
 }
 
