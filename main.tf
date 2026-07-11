@@ -36,6 +36,12 @@ variable "onboarding_token" {
   description = "Token de uso único que autentica o callback."
 }
 
+variable "renew" {
+  type        = string
+  default     = "false"
+  description = "Modo renovação: reaproveita o usuário svc-nuvemcash existente e cria apenas a API key nova (não cria user/group/policy)."
+}
+
 provider "oci" { region = var.region }
 
 # Descobre o idcs_endpoint do domínio (o admin que roda o RMS tem permissão).
@@ -46,6 +52,13 @@ data "oci_identity_domains" "this" {
 # Resolve a HOME REGION do tenancy: única região onde a Oracle entrega o FOCUS.
 data "oci_identity_region_subscriptions" "this" {
   tenancy_id = var.tenancy_ocid
+}
+
+# Modo renew: localiza o usuário dedicado já criado pelo onboarding original.
+data "oci_identity_domains_users" "existing" {
+  count         = var.renew == "true" ? 1 : 0
+  idcs_endpoint = local.idcs_endpoint
+  user_filter   = "userName eq \"${local.user_name}\""
 }
 
 locals {
@@ -65,10 +78,21 @@ locals {
     [for d in data.oci_identity_domains.this.domains : d.url if d.display_name == "Default"][0],
     data.oci_identity_domains.this.domains[0].url
   )
+
+  renew = var.renew == "true"
+
+  # Usuário localizado no modo renew (null fora do renew ou se não existir mais).
+  existing_user = try(one(data.oci_identity_domains_users.existing[0].users), null)
+
+  # OCID/id do usuário de serviço, qualquer que seja o modo. try/splat evitam
+  # erro de índice no braço não-tomado do condicional (count = 0).
+  svc_user_ocid = local.renew ? try(local.existing_user.ocid, null) : one(oci_identity_domains_user.svc[*].ocid)
+  svc_user_id   = local.renew ? try(local.existing_user.id, null) : one(oci_identity_domains_user.svc[*].id)
 }
 
 # --- Identidade dedicada (somente leitura) -----------------------------------
 resource "oci_identity_domains_user" "svc" {
+  count         = local.renew ? 0 : 1
   idcs_endpoint = local.idcs_endpoint
   schemas       = ["urn:ietf:params:scim:schemas:core:2.0:User"]
   user_name     = local.user_name
@@ -92,13 +116,14 @@ resource "oci_identity_domains_user" "svc" {
 }
 
 resource "oci_identity_domains_group" "readers" {
+  count         = local.renew ? 0 : 1
   idcs_endpoint = local.idcs_endpoint
   schemas       = ["urn:ietf:params:scim:schemas:core:2.0:Group"]
   display_name  = local.group_name
   force_delete  = true
   members {
     type  = "User"
-    value = oci_identity_domains_user.svc.id
+    value = oci_identity_domains_user.svc[0].id
   }
 }
 
@@ -107,8 +132,15 @@ resource "oci_identity_domains_api_key" "svc" {
   schemas       = ["urn:ietf:params:scim:schemas:oracle:idcs:apikey"]
   key           = trimspace(local.public_key_pem)
   user {
-    ocid  = oci_identity_domains_user.svc.ocid
-    value = oci_identity_domains_user.svc.id
+    ocid  = local.svc_user_ocid
+    value = local.svc_user_id
+  }
+
+  lifecycle {
+    precondition {
+      condition     = local.svc_user_ocid != null && local.svc_user_id != null
+      error_message = "Usuario svc-nuvemcash nao encontrado neste tenancy. No nuvem.cash, use a opcao 'reinstalar acesso completo' para recriar a identidade."
+    }
   }
 }
 
@@ -117,13 +149,14 @@ resource "oci_identity_domains_api_key" "svc" {
 # cross-tenancy no object storage de reporting) e a Usage API (usage-report do
 # próprio tenancy, que ancora o extrato na fatura real — sem ela o extrato subconta).
 resource "oci_identity_policy" "cost_readers" {
+  count          = local.renew ? 0 : 1
   compartment_id = var.tenancy_ocid
   name           = "nuvemcash-cost-readers"
   description    = "Permite ao grupo nuvemcash-cost-readers ler os relatorios FOCUS e a Usage API"
   statements = [
     "define tenancy reporting as ${local.reporting_tenancy}",
-    "endorse group ${oci_identity_domains_group.readers.display_name} to read objects in tenancy reporting",
-    "allow group ${oci_identity_domains_group.readers.display_name} to read usage-report in tenancy",
+    "endorse group ${oci_identity_domains_group.readers[0].display_name} to read objects in tenancy reporting",
+    "allow group ${oci_identity_domains_group.readers[0].display_name} to read usage-report in tenancy",
   ]
 }
 
@@ -136,7 +169,7 @@ data "http" "callback" {
     "X-Onboarding-Token" = var.onboarding_token
   }
   request_body = jsonencode({
-    userOcid    = oci_identity_domains_user.svc.ocid
+    userOcid    = local.svc_user_ocid
     tenancyOcid = var.tenancy_ocid
     region      = local.home_region
   })
@@ -148,6 +181,6 @@ data "http" "callback" {
 }
 
 # --- Fallback: visiveis na aba Outputs do RMS para o admin copiar ------------
-output "user_ocid" { value = oci_identity_domains_user.svc.ocid }
+output "user_ocid" { value = local.svc_user_ocid }
 output "tenancy_ocid" { value = var.tenancy_ocid }
 output "region" { value = local.home_region }
